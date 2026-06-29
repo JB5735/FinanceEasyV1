@@ -1,0 +1,6 @@
+date,description,category,amount,type
+2026-06-01,Panda Express,Food,14.75,Expense
+2026-06-02,HEB Groceries,Food,52.18,Expense
+2026-06-03,Paycheck,Income,250.00,Income
+2026-06-05,Gas,Transport,32.41,Expense
+2026-06-07,Spotify,Subscriptions,10.99,Expense
