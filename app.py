@@ -17,7 +17,7 @@ st.divider()
 # ---------- Expense Input Form ----------
 st.header("Add a Transaction")
 
-with st.form("transaction_form"):
+with st.form("transaction_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
 
     with col1:
@@ -27,7 +27,16 @@ with st.form("transaction_form"):
     with col2:
         category = st.selectbox(
             "Category",
-            ["Food", "Transport", "Entertainment", "Shopping", "School", "Subscriptions", "Income", "Other"]
+            [
+                "Food",
+                "Transport",
+                "Entertainment",
+                "Shopping",
+                "School",
+                "Subscriptions",
+                "Income",
+                "Other",
+            ],
         )
         amount = st.number_input("Amount", min_value=0.0, step=0.01)
 
@@ -43,16 +52,16 @@ with st.form("transaction_form"):
         else:
             new_transaction = {
                 "date": transaction_date,
-                "description": description,
+                "description": description.strip(),
                 "category": category,
                 "amount": amount,
-                "type": transaction_type
+                "type": transaction_type,
             }
 
             st.session_state.transactions.append(new_transaction)
             st.success("Transaction added!")
 
-# ---------- Create DataFrame ----------
+# ---------- Create DataFrame From Entries ----------
 df = pd.DataFrame(st.session_state.transactions)
 
 st.divider()
@@ -63,35 +72,67 @@ st.header("Transactions")
 if df.empty:
     st.info("No transactions yet. Add one above to get started.")
 else:
+    df["date"] = pd.to_datetime(df["date"])
+
+    st.subheader("All Transactions")
     st.dataframe(df, use_container_width=True)
 
-    # ---------- Filtering ----------
-    st.subheader("Filter by Category")
+    # ---------- Filtering Rows ----------
+    st.subheader("Filter Transactions")
 
-    selected_category = st.selectbox(
-        "Choose a category to filter",
-        ["All"] + sorted(df["category"].unique().tolist())
-    )
+    filter_col1, filter_col2 = st.columns(2)
+
+    with filter_col1:
+        selected_category = st.selectbox(
+            "Filter by Category",
+            ["All"] + sorted(df["category"].unique().tolist()),
+        )
+
+    with filter_col2:
+        selected_type = st.selectbox(
+            "Filter by Type",
+            ["All", "Expense", "Income"],
+        )
+
+    filtered_df = df.copy()
 
     if selected_category != "All":
-        filtered_df = df[df["category"] == selected_category]
-    else:
-        filtered_df = df
+        filtered_df = filtered_df[filtered_df["category"] == selected_category]
+
+    if selected_type != "All":
+        filtered_df = filtered_df[filtered_df["type"] == selected_type]
 
     st.dataframe(filtered_df, use_container_width=True)
 
-    # ---------- Calculate Total Spending ----------
+    # ---------- Calculate Totals ----------
     expenses_df = df[df["type"] == "Expense"]
     income_df = df[df["type"] == "Income"]
 
     total_spent = expenses_df["amount"].sum()
     total_income = income_df["amount"].sum()
     current_balance = total_income - total_spent
+    transaction_count = len(df)
 
     st.subheader("Summary")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Total Income", f"${total_income:,.2f}")
     col2.metric("Total Spent", f"${total_spent:,.2f}")
     col3.metric("Current Balance", f"${current_balance:,.2f}")
+    col4.metric("Transactions", transaction_count)
+
+    # ---------- Category Totals ----------
+    st.subheader("Spending by Category")
+
+    if not expenses_df.empty:
+        category_totals = (
+            expenses_df.groupby("category")["amount"]
+            .sum()
+            .reset_index()
+            .sort_values("amount", ascending=False)
+        )
+
+        st.dataframe(category_totals, use_container_width=True)
+    else:
+        st.info("No expenses yet, so category totals are not available.")
