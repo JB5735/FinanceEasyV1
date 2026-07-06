@@ -1,12 +1,65 @@
-import streamlit as st
-import pandas as pd
+import os
 from datetime import date
 
+import pandas as pd
+import streamlit as st
+
+# ---------- App Config ----------
 st.set_page_config(page_title="FinanceEasy", page_icon="💰", layout="wide")
 
-# ---------- Session State ----------
-if "transactions" not in st.session_state:
-    st.session_state.transactions = []
+DATA_FILE = "data/expenses.csv"
+COLUMNS = ["date", "description", "category", "amount", "type"]
+
+
+# ---------- Helper Functions ----------
+def ensure_data_file_exists():
+    os.makedirs("data", exist_ok=True)
+
+    if not os.path.exists(DATA_FILE):
+        empty_df = pd.DataFrame(columns=COLUMNS)
+        empty_df.to_csv(DATA_FILE, index=False)
+
+
+def load_transactions():
+    ensure_data_file_exists()
+
+    try:
+        df = pd.read_csv(DATA_FILE)
+
+        for column in COLUMNS:
+            if column not in df.columns:
+                df[column] = ""
+
+        df = df[COLUMNS]
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+
+        return df
+
+    except Exception:
+        return pd.DataFrame(columns=COLUMNS)
+
+
+def save_transactions(df):
+    df.to_csv(DATA_FILE, index=False)
+
+
+def add_transaction(df, transaction):
+    new_row = pd.DataFrame([transaction])
+    updated_df = pd.concat([df, new_row], ignore_index=True)
+    save_transactions(updated_df)
+    return updated_df
+
+
+def delete_transaction(df, index_to_delete):
+    updated_df = df.drop(index=index_to_delete).reset_index(drop=True)
+    save_transactions(updated_df)
+    return updated_df
+
+
+# ---------- Load CSV on Startup ----------
+if "transactions_df" not in st.session_state:
+    st.session_state.transactions_df = load_transactions()
+
 
 # ---------- Title + Layout ----------
 st.title("💰 FinanceEasy")
@@ -14,7 +67,8 @@ st.write("A simple personal finance tracker for college budgeting.")
 
 st.divider()
 
-# ---------- Expense Input Form ----------
+
+# ---------- Transaction Form ----------
 st.header("Add a Transaction")
 
 with st.form("transaction_form", clear_on_submit=True):
@@ -38,6 +92,7 @@ with st.form("transaction_form", clear_on_submit=True):
                 "Other",
             ],
         )
+
         amount = st.number_input("Amount", min_value=0.0, step=0.01)
 
     transaction_type = st.selectbox("Type", ["Expense", "Income"])
@@ -51,20 +106,26 @@ with st.form("transaction_form", clear_on_submit=True):
             st.error("Amount must be greater than 0.")
         else:
             new_transaction = {
-                "date": transaction_date,
+                "date": transaction_date.isoformat(),
                 "description": description.strip(),
                 "category": category,
-                "amount": amount,
+                "amount": float(amount),
                 "type": transaction_type,
             }
 
-            st.session_state.transactions.append(new_transaction)
-            st.success("Transaction added!")
+            st.session_state.transactions_df = add_transaction(
+                st.session_state.transactions_df,
+                new_transaction,
+            )
 
-# ---------- Create DataFrame From Entries ----------
-df = pd.DataFrame(st.session_state.transactions)
+            st.success("Transaction added and saved!")
+
+
+# ---------- Current Data ----------
+df = st.session_state.transactions_df.copy()
 
 st.divider()
+
 
 # ---------- Display Transactions ----------
 st.header("Transactions")
@@ -72,12 +133,42 @@ st.header("Transactions")
 if df.empty:
     st.info("No transactions yet. Add one above to get started.")
 else:
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    st.subheader("All Transactions")
-    st.dataframe(df, use_container_width=True)
+    st.subheader("Saved Transactions")
 
-    # ---------- Filtering Rows ----------
+    display_df = df.copy()
+    display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
+
+    st.dataframe(display_df, use_container_width=True)
+
+    # ---------- Delete Transaction ----------
+    st.subheader("Delete a Transaction")
+
+    delete_options = [
+        f"{index}: {row['date']} | {row['description']} | {row['category']} | ${row['amount']:,.2f}"
+        for index, row in display_df.iterrows()
+    ]
+
+    selected_transaction = st.selectbox(
+        "Choose a transaction to delete",
+        delete_options,
+    )
+
+    if st.button("Delete Selected Transaction"):
+        index_to_delete = int(selected_transaction.split(":")[0])
+
+        st.session_state.transactions_df = delete_transaction(
+            st.session_state.transactions_df,
+            index_to_delete,
+        )
+
+        st.success("Transaction deleted and CSV updated!")
+        st.rerun()
+
+    st.divider()
+
+    # ---------- Filtering ----------
     st.subheader("Filter Transactions")
 
     filter_col1, filter_col2 = st.columns(2)
@@ -85,7 +176,7 @@ else:
     with filter_col1:
         selected_category = st.selectbox(
             "Filter by Category",
-            ["All"] + sorted(df["category"].unique().tolist()),
+            ["All"] + sorted(df["category"].dropna().unique().tolist()),
         )
 
     with filter_col2:
@@ -102,9 +193,12 @@ else:
     if selected_type != "All":
         filtered_df = filtered_df[filtered_df["type"] == selected_type]
 
-    st.dataframe(filtered_df, use_container_width=True)
+    filtered_display_df = filtered_df.copy()
+    filtered_display_df["date"] = filtered_display_df["date"].dt.strftime("%Y-%m-%d")
 
-    # ---------- Calculate Totals ----------
+    st.dataframe(filtered_display_df, use_container_width=True)
+
+    # ---------- Summary ----------
     expenses_df = df[df["type"] == "Expense"]
     income_df = df[df["type"] == "Income"]
 
@@ -122,7 +216,7 @@ else:
     col3.metric("Current Balance", f"${current_balance:,.2f}")
     col4.metric("Transactions", transaction_count)
 
-    # ---------- Category Totals ----------
+    # ---------- Spending by Category ----------
     st.subheader("Spending by Category")
 
     if not expenses_df.empty:
