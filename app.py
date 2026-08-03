@@ -559,14 +559,58 @@ def show_dashboard() -> None:
 # TRANSACTIONS PAGE
 # =========================================================
 
+def reset_transaction_category() -> None:
+    """Clear the old category when transaction type changes."""
+    st.session_state.pop("transaction_category", None)
+
+def update_transaction(
+    df: pd.DataFrame,
+    index_to_update: int,
+    updated_transaction: dict,
+) -> pd.DataFrame:
+    """Update one transaction and save the CSV."""
+
+    updated_df = df.copy()
+
+    for column, value in updated_transaction.items():
+        updated_df.at[index_to_update, column] = value
+
+    save_transactions(updated_df)
+
+    return updated_df
+
 def show_transactions() -> None:
     st.title("Transactions")
     st.caption("Add, review, filter, and delete transactions.")
 
+    # -----------------------------------------------------
+    # ADD TRANSACTION
+    # -----------------------------------------------------
+    
     with st.expander(
         "➕ Add a Transaction",
         expanded=True,
     ):
+        transaction_type = st.selectbox(
+            "Type",
+            ["Expense", "Income"],
+            key="transaction_type",
+            on_change=reset_transaction_category,
+        )
+
+        if transaction_type == "Income":
+            category_options = [
+                "Job",
+                "Tutoring",
+                "Freelancing",
+                "Scholarship",
+                "Family Support",
+                "Refund",
+                "Other",
+            ]
+        else:
+            category_options = EXPENSE_CATEGORIES
+
         with st.form(
             "transaction_form",
             clear_on_submit=True,
@@ -584,27 +628,10 @@ def show_transactions() -> None:
                 )
 
             with form_col2:
-                transaction_type = st.selectbox(
-                    "Type",
-                    ["Expense", "Income"],
-                )
-
-                if transaction_type == "Income":
-                    category_options = [
-                        "Job",
-                        "Tutoring",
-                        "Freelancing",
-                        "Scholarship",
-                        "Family Support",
-                        "Refund",
-                        "Other",
-                    ]
-                else:
-                    category_options = EXPENSE_CATEGORIES
-
                 category = st.selectbox(
                     "Category",
                     category_options,
+                    key="transaction_category",
                 )
 
                 amount = st.number_input(
@@ -650,6 +677,10 @@ def show_transactions() -> None:
 
                     st.rerun()
 
+    # -----------------------------------------------------
+    # LOAD CURRENT TRANSACTION DATA
+    # -----------------------------------------------------
+
     current_df = st.session_state.transactions_df.copy()
 
     if current_df.empty:
@@ -660,6 +691,10 @@ def show_transactions() -> None:
         current_df["date"],
         errors="coerce",
     )
+
+    # -----------------------------------------------------
+    # SAVED TRANSACTIONS + FILTERS
+    # -----------------------------------------------------
 
     st.subheader("Saved Transactions")
 
@@ -695,7 +730,11 @@ def show_transactions() -> None:
             filtered_df["type"] == type_filter
         ]
 
-    display_df = filtered_df.copy()
+    display_df = (
+        filtered_df.copy()
+        .sort_values("date", ascending=False)
+    )
+
     display_df["date"] = display_df[
         "date"
     ].dt.strftime("%Y-%m-%d")
@@ -705,6 +744,145 @@ def show_transactions() -> None:
         use_container_width=True,
         hide_index=True,
     )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # EDIT TRANSACTION
+    # -----------------------------------------------------
+
+    st.subheader("Edit a Transaction")
+    
+    edit_options = {
+        (
+            f"{index} — "
+            f"{row['date'].strftime('%Y-%m-%d')} | "
+            f"{row['description']} | "
+            f"{row['category']} | "
+            f"{format_currency(row['amount'])}"
+        ): index
+        for index, row in current_df.iterrows()
+    }
+
+    selected_edit_label = st.selectbox(
+        "Select a transaction to edit",
+        list(edit_options.keys()),
+        key="edit_transaction_selector",
+    )
+
+    edit_index = edit_options[selected_edit_label]
+    edit_row = current_df.loc[edit_index]
+
+    income_categories = [
+        "Job",
+        "Tutoring",
+        "Freelancing",
+        "Scholarship",
+        "Family Support",
+        "Refund",
+        "Other",
+    ]
+
+    current_type = edit_row["type"]
+
+    edit_type = st.selectbox(
+        "Transaction type",
+        ["Expense", "Income"],
+        index=0 if current_type == "Expense" else 1,
+        key=f"edit_type_{edit_index}",
+    )
+
+    if edit_type == "Income":
+        edit_category_options = income_categories
+    else:
+        edit_category_options = EXPENSE_CATEGORIES
+
+    current_category = edit_row["category"]
+
+    if current_category in edit_category_options:
+        category_index = edit_category_options.index(
+            current_category
+        )
+    else:
+        category_index = 0
+
+    with st.form(
+        f"edit_transaction_form_{edit_index}",
+    ):
+        edit_col1, edit_col2 = st.columns(2)
+
+        with edit_col1:
+            edited_date = st.date_input(
+                "Date",
+                value=edit_row["date"].date(),
+                key=f"edit_date_{edit_index}",
+            )
+
+            edited_description = st.text_input(
+                "Description / Merchant",
+                value=str(edit_row["description"]),
+                key=f"edit_description_{edit_index}",
+            )
+
+        with edit_col2:
+            edited_category = st.selectbox(
+                "Category",
+                edit_category_options,
+                index=category_index,
+                key=f"edit_category_{edit_index}_{edit_type}",
+            )
+
+            edited_amount = st.number_input(
+                "Amount",
+                min_value=0.0,
+                value=float(edit_row["amount"]),
+                step=0.01,
+                format="%.2f",
+                key=f"edit_amount_{edit_index}",
+            )
+
+        save_edit_button = st.form_submit_button(
+            "Save Changes",
+            use_container_width=True,
+        )
+
+        if save_edit_button:
+            if not edited_description.strip():
+                st.error(
+                    "Please enter a description or merchant."
+                )
+
+            elif edited_amount <= 0:
+                st.error(
+                    "Amount must be greater than zero."
+                )
+
+            else:
+                updated_transaction = {
+                    "date": edited_date.isoformat(),
+                    "description": edited_description.strip(),
+                    "category": edited_category,
+                    "amount": float(edited_amount),
+                    "type": edit_type,
+                }
+
+                st.session_state.transactions_df = update_transaction(
+                    st.session_state.transactions_df,
+                    edit_index,
+                    updated_transaction,
+                )
+
+                st.success(
+                    "Transaction updated and CSV saved."
+                )
+
+                st.rerun()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # DELETE TRANSACTION
+    # -----------------------------------------------------
 
     st.subheader("Delete a Transaction")
 
@@ -728,7 +906,9 @@ def show_transactions() -> None:
         "Delete Selected Transaction",
         type="secondary",
     ):
-        index_to_delete = delete_options[selected_label]
+        index_to_delete = delete_options[
+            selected_delete_label
+        ]
 
         st.session_state.transactions_df = delete_transaction(
             st.session_state.transactions_df,
@@ -740,7 +920,6 @@ def show_transactions() -> None:
         )
 
         st.rerun()
-
 
 # =========================================================
 # BUDGET PAGE

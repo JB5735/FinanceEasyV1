@@ -1,6 +1,6 @@
 date,description,category,amount,type
-2026-07-28,Panda Express,Food,25.31,Expense
-2026-07-28,Mcdonalds,Food,15.21,Expense
-2026-07-28,School Supplies,School,58.99,Expense
-2026-07-28,Work Income,Job,180.0,Income
-2026-08-03,awda,Job,1.0,Income
+2026-08-01,Mathnasium,Tutoring,180.0,Income
+2026-08-08,Mathnasium,Tutoring,220.0,Income
+2026-08-01,Panda Express,Food,25.24,Expense
+2026-08-03,School Supplies,School,89.99,Expense
+2026-08-04,Cheesecake factory,Food,92.94,Expense
