@@ -3,8 +3,12 @@ from datetime import date
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from anthropic import Anthropic
+from dotenv import load_dotenv
 
+load_dotenv()
 
 # =========================================================
 # APP CONFIGURATION
@@ -19,6 +23,11 @@ st.set_page_config(
 
 DATA_FILE = "data/expenses.csv"
 BUDGET_FILE = "data/budget.csv"
+
+ANTHROPIC_MODEL = "claude-haiku-4-5"
+
+AI_INPUT_COST_PER_MILLION = 0.50
+AI_OUTPUT_COST_PER_MILLION = 2.50
 
 TRANSACTION_COLUMNS = [
     "date",
@@ -48,19 +57,53 @@ EXPENSE_CATEGORIES = [
 st.markdown(
     """
     <style>
+        /* Main page spacing */
         .block-container {
             padding-top: 1.5rem;
             padding-bottom: 3rem;
         }
 
+        /* Default Streamlit metric cards */
         [data-testid="stMetric"] {
             border: 1px solid rgba(128, 128, 128, 0.25);
             border-radius: 10px;
             padding: 14px;
         }
 
+        /* Sidebar divider */
         [data-testid="stSidebar"] {
             border-right: 1px solid rgba(128, 128, 128, 0.20);
+        }
+
+        /* Custom dashboard metric cards */
+        .finance-metric-card {
+            border: 1px solid rgba(128, 128, 128, 0.25);
+            border-radius: 12px;
+            padding: 18px 16px;
+            min-height: 105px;
+            background: rgba(20, 22, 28, 0.35);
+        }
+
+        .finance-metric-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .finance-metric-value {
+            font-size: 1.75rem;
+            font-weight: 500;
+            line-height: 1.2;
+        }
+
+        /* Slightly reduce spacing above charts */
+        [data-testid="stPlotlyChart"] {
+            margin-top: -0.25rem;
+        }
+
+        /* Make horizontal dividers slightly softer */
+        hr {
+            border-color: rgba(128, 128, 128, 0.25);
         }
     </style>
     """,
@@ -273,6 +316,240 @@ def format_currency(value: float) -> str:
     """Format numbers as dollars."""
     return f"${value:,.2f}"
 
+# =========================================================
+# AI FUNCTIONS
+# =========================================================
+
+def create_ai_spending_summary(
+    transactions_df: pd.DataFrame,
+    selected_month: str,
+    savings_goal: float,
+) -> str:
+    """Convert one month of transaction data into an AI-ready summary."""
+
+    if transactions_df.empty:
+        return ""
+
+    working_df = transactions_df.copy()
+
+    working_df["date"] = pd.to_datetime(
+        working_df["date"],
+        errors="coerce",
+    )
+
+    working_df["amount"] = pd.to_numeric(
+        working_df["amount"],
+        errors="coerce",
+    ).fillna(0.0)
+
+    monthly_df = working_df[
+        working_df["date"].dt.strftime("%Y-%m")
+        == selected_month
+    ].copy()
+
+    if monthly_df.empty:
+        return ""
+
+    income_df = monthly_df[
+        monthly_df["type"] == "Income"
+    ]
+
+    expense_df = monthly_df[
+        monthly_df["type"] == "Expense"
+    ]
+
+    total_income = income_df["amount"].sum()
+    total_expenses = expense_df["amount"].sum()
+    current_surplus = total_income - total_expenses
+    savings_difference = current_surplus - savings_goal
+
+    expense_category_totals = (
+        expense_df
+        .groupby("category")["amount"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    income_category_totals = (
+        income_df
+        .groupby("category")["amount"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    if expense_category_totals.empty:
+        expense_lines = "- No expenses recorded"
+    else:
+        expense_lines = "\n".join(
+            f"- {category}: ${amount:,.2f}"
+            for category, amount in expense_category_totals.items()
+        )
+
+    if income_category_totals.empty:
+        income_lines = "- No income recorded"
+    else:
+        income_lines = "\n".join(
+            f"- {category}: ${amount:,.2f}"
+            for category, amount in income_category_totals.items()
+        )
+
+    if savings_difference >= 0:
+        goal_status = (
+            f"The current surplus is "
+            f"${savings_difference:,.2f} above the savings goal."
+        )
+    else:
+        goal_status = (
+            f"The current surplus is "
+            f"${abs(savings_difference):,.2f} below the savings goal."
+        )
+
+    return f"""
+Analysis month: {selected_month}
+
+Verified totals calculated by FinanceEasy:
+- Total income: ${total_income:,.2f}
+- Total expenses: ${total_expenses:,.2f}
+- Current surplus or deficit: ${current_surplus:,.2f}
+- Monthly savings goal: ${savings_goal:,.2f}
+- Goal status: {goal_status}
+
+Income by source:
+{income_lines}
+
+Expenses by category:
+{expense_lines}
+
+Do not recalculate or contradict the verified totals above.
+""".strip()
+
+
+def get_ai_style_instructions(advice_style: str) -> str:
+    """Return instructions for the selected recommendation style."""
+
+    styles = {
+        "Supportive Coach": (
+            "Use an encouraging and nonjudgmental tone. "
+            "Prioritize sustainable habits and acknowledge what the "
+            "user is already doing well."
+        ),
+        "Direct Analyst": (
+            "Be concise and numbers-focused. Identify the largest "
+            "opportunities and give specific dollar-based recommendations."
+        ),
+        "Goal-Based Planner": (
+            "Work backward from the savings goal. Explain which realistic "
+            "changes would help close any gap or improve the existing surplus."
+        ),
+    }
+
+    return styles[advice_style]
+
+
+def get_ai_spending_advice(
+    spending_summary: str,
+    advice_style: str,
+) -> tuple[str, int, int, float]:
+    """Send the financial summary to Claude and return advice and usage."""
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "ANTHROPIC_API_KEY was not found. "
+            "Check that your .env file exists."
+        )
+
+    if not spending_summary:
+        raise ValueError(
+            "No transaction data is available for the selected month."
+        )
+
+    client = Anthropic(api_key=api_key)
+
+    style_instructions = get_ai_style_instructions(
+        advice_style
+    )
+
+    message = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=700,
+        system=(
+            "You are FinanceEasy AI, an educational budgeting assistant "
+            "for college students. Use only the supplied financial data. "
+            "Do not invent income, expenses, percentages, or personal facts. "
+            "Do not contradict the totals calculated by FinanceEasy. "
+            "Do not shame the user or recommend eliminating all discretionary "
+            "spending. Do not present the response as professional financial, "
+            "tax, legal, or investment advice."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": f"""
+Analyze the following monthly financial summary:
+
+{spending_summary}
+
+Response style:
+{style_instructions}
+
+Use exactly these headings:
+
+### Financial Snapshot
+Briefly explain the user's current position and savings-goal status.
+
+### Areas to Optimize
+Identify up to three categories worth reviewing. Explain why using the
+provided dollar amounts.
+
+### Recommended Changes
+Give three specific, realistic actions. Include estimated dollar amounts
+where possible.
+
+### Estimated Monthly Impact
+Estimate a reasonable savings range. Do not promise guaranteed results.
+
+### Next Step
+Give one action the user can take during the next seven days.
+
+Keep the complete response concise and readable.
+""",
+            }
+        ],
+    )
+
+    response_parts = [
+        block.text
+        for block in message.content
+        if getattr(block, "type", None) == "text"
+    ]
+
+    response_text = "\n".join(response_parts)
+
+    input_tokens = message.usage.input_tokens
+    output_tokens = message.usage.output_tokens
+
+    input_cost = (
+        input_tokens
+        / 1_000_000
+        * AI_INPUT_COST_PER_MILLION
+    )
+
+    output_cost = (
+        output_tokens
+        / 1_000_000
+        * AI_OUTPUT_COST_PER_MILLION
+    )
+
+    estimated_cost = input_cost + output_cost
+
+    return (
+        response_text,
+        input_tokens,
+        output_tokens,
+        estimated_cost,
+    )
 
 # =========================================================
 # SESSION STATE
@@ -338,12 +615,17 @@ def show_dashboard() -> None:
 
     month_options = get_month_options(df)
 
-    top_left, top_right = st.columns([3, 1])
+    # -----------------------------------------------------
+    # MONTH SELECTOR
+    # -----------------------------------------------------
 
-    with top_right:
+    title_space, month_column = st.columns([3, 1])
+
+    with month_column:
         selected_month = st.selectbox(
             "Dashboard month",
             month_options,
+            key="dashboard_month",
         )
 
     monthly_df = filter_by_month(
@@ -357,94 +639,268 @@ def show_dashboard() -> None:
         st.session_state.monthly_budget,
     )
 
+    total_balance = summary["total_balance"]
+    monthly_income = summary["monthly_income"]
+    monthly_spending = summary["monthly_spending"]
+    remaining_budget = summary["remaining_budget"]
+
+    # -----------------------------------------------------
+    # CUSTOM METRIC CARDS
+    # -----------------------------------------------------
+
+    def display_metric_card(
+        title: str,
+        value: float,
+        value_color: str,
+    ) -> None:
+        """Display a dashboard metric card with a colored value."""
+
+        card_html = (
+            f'<div class="finance-metric-card">'
+            f'<div class="finance-metric-label">{title}</div>'
+            f'<div class="finance-metric-value" '
+            f'style="color: {value_color};">'
+            f'{format_currency(value)}'
+            f'</div>'
+            f'</div>'
+        )
+
+        st.markdown(
+            card_html,
+            unsafe_allow_html=True,
+        )
+
     metric1, metric2, metric3, metric4 = st.columns(4)
 
-    metric1.metric(
-        "Total Balance",
-        format_currency(summary["total_balance"]),
-    )
+    with metric1:
+        display_metric_card(
+            "Total Balance",
+            total_balance,
+            "#78C850" if total_balance >= 0 else "#FF4B4B",
+        )
 
-    metric2.metric(
-        "Income This Month",
-        format_currency(summary["monthly_income"]),
-    )
+    with metric2:
+        display_metric_card(
+            "Income This Month",
+            monthly_income,
+            "#78C850",
+        )
 
-    metric3.metric(
-        "Spent This Month",
-        format_currency(summary["monthly_spending"]),
-    )
+    with metric3:
+        display_metric_card(
+            "Spent This Month",
+            monthly_spending,
+            "#FF4B4B",
+        )
 
-    remaining_value = summary["remaining_budget"]
-
-    metric4.metric(
-        "Remaining Budget",
-        format_currency(remaining_value),
-    )
+    with metric4:
+        display_metric_card(
+            "Remaining Budget",
+            remaining_budget,
+            "#4AA8FF" if remaining_budget >= 0 else "#FF4B4B",
+        )
 
     st.divider()
 
-    chart_left, chart_right = st.columns([3, 2])
+    # -----------------------------------------------------
+    # PREPARE MONTHLY CHART DATA
+    # -----------------------------------------------------
 
-    monthly_expenses = monthly_df[
+    monthly_income_df = monthly_df[
+        monthly_df["type"] == "Income"
+    ].copy()
+
+    monthly_expenses_df = monthly_df[
         monthly_df["type"] == "Expense"
     ].copy()
 
-    # ---------- Spending Over Time ----------
+    chart_left, chart_right = st.columns([3, 2])
+
+    # -----------------------------------------------------
+    # INCOME VS. SPENDING OVER TIME
+    # -----------------------------------------------------
+
     with chart_left:
-        st.subheader("Spending Over Time")
+        st.subheader("Income vs. Spending Over Time")
 
-        if monthly_expenses.empty:
+        if monthly_df.empty:
             st.info(
-                "Add expense transactions to display the timeline."
+                "Add income and expense transactions to display "
+                "the monthly timeline."
             )
+
         else:
-            daily_spending = (
-                monthly_expenses
-                .groupby("date", as_index=False)["amount"]
+            # Group every transaction by date and type.
+            daily_totals = (
+                monthly_df
+                .groupby(
+                    ["date", "type"],
+                    as_index=False,
+                )["amount"]
                 .sum()
-                .sort_values("date")
             )
 
-            daily_spending["cumulative_spending"] = (
-                daily_spending["amount"].cumsum()
+            # Convert the separate income/expense rows into columns.
+            daily_pivot = (
+                daily_totals
+                .pivot(
+                    index="date",
+                    columns="type",
+                    values="amount",
+                )
+                .fillna(0.0)
+                .sort_index()
             )
 
-            timeline_chart = px.line(
-                daily_spending,
-                x="date",
-                y="cumulative_spending",
-                markers=True,
-                labels={
-                    "date": "Date",
-                    "cumulative_spending": "Cumulative Spending",
-                },
+            # Ensure both columns exist, even if the month only contains
+            # income or only contains expenses.
+            if "Income" not in daily_pivot.columns:
+                daily_pivot["Income"] = 0.0
+
+            if "Expense" not in daily_pivot.columns:
+                daily_pivot["Expense"] = 0.0
+
+            # Include every calendar day between the first and last
+            # transaction so lines remain continuous.
+            start_date = daily_pivot.index.min()
+            end_date = daily_pivot.index.max()
+
+            full_date_range = pd.date_range(
+                start=start_date,
+                end=end_date,
+                freq="D",
             )
 
-            timeline_chart.update_layout(
-                margin=dict(l=10, r=10, t=20, b=10),
-                yaxis_tickprefix="$",
-                showlegend=False,
+            daily_pivot = (
+                daily_pivot
+                .reindex(
+                    full_date_range,
+                    fill_value=0.0,
+                )
+                .rename_axis("date")
+                .reset_index()
+            )
+
+            daily_pivot["cumulative_income"] = (
+                daily_pivot["Income"].cumsum()
+            )
+
+            daily_pivot["cumulative_spending"] = (
+                daily_pivot["Expense"].cumsum()
+            )
+
+            daily_pivot["difference"] = (
+                daily_pivot["cumulative_income"]
+                - daily_pivot["cumulative_spending"]
+            )
+
+            comparison_chart = go.Figure()
+
+            # Income line
+            comparison_chart.add_trace(
+                go.Scatter(
+                    x=daily_pivot["date"],
+                    y=daily_pivot["cumulative_income"],
+                    mode="lines+markers",
+                    name="Cumulative Income",
+                    line=dict(
+                        color="#78C850",
+                        width=3,
+                    ),
+                    marker=dict(
+                        size=7,
+                    ),
+                    hovertemplate=(
+                        "<b>%{x|%b %d, %Y}</b><br>"
+                        "Cumulative income: $%{y:,.2f}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            # Spending line
+            comparison_chart.add_trace(
+                go.Scatter(
+                    x=daily_pivot["date"],
+                    y=daily_pivot["cumulative_spending"],
+                    mode="lines+markers",
+                    name="Cumulative Spending",
+                    line=dict(
+                        color="#FF4B4B",
+                        width=3,
+                    ),
+                    marker=dict(
+                        size=7,
+                    ),
+                    fill="tonexty",
+                    fillcolor="rgba(120, 200, 80, 0.10)",
+                    hovertemplate=(
+                        "<b>%{x|%b %d, %Y}</b><br>"
+                        "Cumulative spending: $%{y:,.2f}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            comparison_chart.update_layout(
+                margin=dict(
+                    l=10,
+                    r=10,
+                    t=15,
+                    b=10,
+                ),
+                height=420,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="left",
+                    x=0,
+                ),
+                xaxis=dict(
+                    title="Date",
+                    showgrid=False,
+                ),
+                yaxis=dict(
+                    title="Cumulative Amount",
+                    tickprefix="$",
+                    gridcolor="rgba(128, 128, 128, 0.20)",
+                ),
             )
 
             st.plotly_chart(
-                timeline_chart,
+                comparison_chart,
                 use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                },
             )
 
-    # ---------- Spending by Category ----------
+    # -----------------------------------------------------
+    # SPENDING BY CATEGORY
+    # -----------------------------------------------------
+
     with chart_right:
         st.subheader("Spending by Category")
 
-        if monthly_expenses.empty:
+        if monthly_expenses_df.empty:
             st.info(
                 "Add expense transactions to display category totals."
             )
+
         else:
             category_totals = (
-                monthly_expenses
-                .groupby("category", as_index=False)["amount"]
+                monthly_expenses_df
+                .groupby(
+                    "category",
+                    as_index=False,
+                )["amount"]
                 .sum()
-                .sort_values("amount", ascending=False)
+                .sort_values(
+                    "amount",
+                    ascending=False,
+                )
             )
 
             category_chart = px.pie(
@@ -457,29 +913,76 @@ def show_dashboard() -> None:
             category_chart.update_traces(
                 textposition="inside",
                 textinfo="percent",
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "Amount: $%{value:,.2f}<br>"
+                    "Share: %{percent}"
+                    "<extra></extra>"
+                ),
             )
 
             category_chart.update_layout(
-                margin=dict(l=10, r=10, t=20, b=10),
+                height=420,
+                margin=dict(
+                    l=10,
+                    r=10,
+                    t=15,
+                    b=10,
+                ),
                 legend_title_text="Category",
             )
 
             st.plotly_chart(
                 category_chart,
                 use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                },
             )
+
+    # -----------------------------------------------------
+    # MONTHLY INSIGHT BANNER
+    # -----------------------------------------------------
+
+    monthly_difference = monthly_income - monthly_spending
+
+    if monthly_difference > 0:
+        st.success(
+            f"↗ You earned "
+            f"{format_currency(monthly_difference)} more than you "
+            f"spent during {selected_month}."
+        )
+
+    elif monthly_difference < 0:
+        st.error(
+            f"↘ You spent "
+            f"{format_currency(abs(monthly_difference))} more than "
+            f"you earned during {selected_month}."
+        )
+
+    else:
+        st.info(
+            f"Your income and spending were equal during "
+            f"{selected_month}."
+        )
 
     st.divider()
 
-    # ---------- Budget Progress ----------
+    # -----------------------------------------------------
+    # BUDGET PROGRESS
+    # -----------------------------------------------------
+
     st.subheader("Monthly Budget Progress")
 
     budget = st.session_state.monthly_budget
-    spent = summary["monthly_spending"]
+    spent = monthly_spending
     remaining = budget - spent
 
     if budget > 0:
-        progress_value = min(spent / budget, 1.0)
+        progress_value = min(
+            spent / budget,
+            1.0,
+        )
     else:
         progress_value = 0.0
 
@@ -504,25 +1007,38 @@ def show_dashboard() -> None:
 
     if spent > budget:
         st.error(
-            f"You are {format_currency(spent - budget)} over budget."
+            f"You are "
+            f"{format_currency(spent - budget)} over budget."
         )
+
     elif budget > 0:
         percentage_used = spent / budget * 100
 
         st.caption(
-            f"{percentage_used:.1f}% of the monthly budget has been used."
+            f"{percentage_used:.1f}% of the monthly budget "
+            f"has been used."
         )
 
     st.divider()
 
-    # ---------- Recent Transactions ----------
+    # -----------------------------------------------------
+    # RECENT TRANSACTIONS
+    # -----------------------------------------------------
+
     st.subheader("Recent Transactions")
 
-    if df.empty:
-        st.info("No transactions have been recorded.")
+    if monthly_df.empty:
+        st.info(
+            "No transactions have been recorded for this month."
+        )
+
     else:
         recent_df = (
-            df.sort_values("date", ascending=False)
+            monthly_df
+            .sort_values(
+                "date",
+                ascending=False,
+            )
             .head(5)
             .copy()
         )
@@ -552,8 +1068,25 @@ def show_dashboard() -> None:
             ],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "date": st.column_config.TextColumn(
+                    "Date"
+                ),
+                "description": st.column_config.TextColumn(
+                    "Merchant / Description"
+                ),
+                "category": st.column_config.TextColumn(
+                    "Category"
+                ),
+                "type": st.column_config.TextColumn(
+                    "Type"
+                ),
+                "amount": st.column_config.NumberColumn(
+                    "Amount",
+                    format="$%.2f",
+                ),
+            },
         )
-
 
 # =========================================================
 # TRANSACTIONS PAGE
@@ -897,9 +1430,10 @@ def show_transactions() -> None:
         for index, row in current_df.iterrows()
     }
 
-    selected_label = st.selectbox(
-        "Select a transaction",
-        list(delete_options.keys()),
+    selected_delete_label = st.selectbox(
+    "Select a transaction",
+    list(delete_options.keys()),
+    key="delete_transaction_selector",
     )
 
     if st.button(
@@ -1127,17 +1661,211 @@ def show_calculators() -> None:
 
 
 def show_ai_advice() -> None:
-    show_placeholder(
-        "AI Advice",
-        "Generate personalized recommendations from spending data.",
-        [
-            "Analyze category spending",
-            "Consider savings goals",
-            "Suggest realistic reductions",
-            "Display actionable next steps",
-        ],
+    st.title("✨ FinanceEasy AI")
+    st.caption(
+        "Receive personalized budgeting suggestions based on "
+        "your saved transactions."
     )
 
+    transactions_df = (
+        st.session_state.transactions_df.copy()
+    )
+
+    if transactions_df.empty:
+        st.info(
+            "Add some income and expense transactions before "
+            "requesting an AI analysis."
+        )
+        return
+
+    transactions_df["date"] = pd.to_datetime(
+        transactions_df["date"],
+        errors="coerce",
+    )
+
+    available_months = (
+        transactions_df["date"]
+        .dropna()
+        .dt.strftime("%Y-%m")
+        .unique()
+        .tolist()
+    )
+
+    available_months = sorted(
+        available_months,
+        reverse=True,
+    )
+
+    if not available_months:
+        st.warning(
+            "FinanceEasy could not find any valid transaction dates."
+        )
+        return
+
+    settings_col1, settings_col2 = st.columns(2)
+
+    with settings_col1:
+        selected_month = st.selectbox(
+            "Month to analyze",
+            available_months,
+            key="ai_selected_month",
+        )
+
+        savings_goal = st.number_input(
+            "Monthly savings goal",
+            min_value=0.0,
+            value=300.0,
+            step=25.0,
+            format="%.2f",
+            key="ai_savings_goal",
+        )
+
+    with settings_col2:
+        advice_style = st.selectbox(
+            "Recommendation style",
+            [
+                "Supportive Coach",
+                "Direct Analyst",
+                "Goal-Based Planner",
+            ],
+            key="ai_advice_style",
+        )
+
+        st.write("**Style description**")
+
+        if advice_style == "Supportive Coach":
+            st.caption(
+                "Encouraging advice focused on sustainable habits."
+            )
+
+        elif advice_style == "Direct Analyst":
+            st.caption(
+                "Concise, numerical recommendations with less filler."
+            )
+
+        else:
+            st.caption(
+                "Recommendations designed around reaching the savings goal."
+            )
+
+    spending_summary = create_ai_spending_summary(
+        transactions_df,
+        selected_month,
+        savings_goal,
+    )
+
+    st.divider()
+
+    if not spending_summary:
+        st.warning(
+            "There are no transactions for the selected month."
+        )
+        return
+
+    with st.expander(
+        "Preview the financial summary sent to AI"
+    ):
+        st.code(
+            spending_summary,
+            language="text",
+        )
+
+    analyze_button = st.button(
+        "✨ Analyze My Spending",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if analyze_button:
+        try:
+            with st.spinner(
+                "FinanceEasy AI is reviewing your spending..."
+            ):
+                (
+                    advice,
+                    input_tokens,
+                    output_tokens,
+                    estimated_cost,
+                ) = get_ai_spending_advice(
+                    spending_summary,
+                    advice_style,
+                )
+
+            st.session_state.ai_advice = advice
+            st.session_state.ai_input_tokens = input_tokens
+            st.session_state.ai_output_tokens = output_tokens
+            st.session_state.ai_estimated_cost = estimated_cost
+            st.session_state.ai_analysis_month = selected_month
+            st.session_state.ai_analysis_goal = savings_goal
+            st.session_state.ai_analysis_style = advice_style
+
+        except Exception as error:
+            st.error(
+                "FinanceEasy AI could not complete the analysis: "
+                f"{error}"
+            )
+
+    if "ai_advice" in st.session_state:
+        st.divider()
+
+        st.subheader(
+            f"Analysis for "
+            f"{st.session_state.ai_analysis_month}"
+        )
+
+        st.caption(
+            f"Style: {st.session_state.ai_analysis_style} · "
+            f"Savings goal: "
+            f"{format_currency(st.session_state.ai_analysis_goal)}"
+        )
+
+        st.markdown(
+            st.session_state.ai_advice
+        )
+
+        with st.expander("API usage and estimated cost"):
+            usage_col1, usage_col2, usage_col3 = st.columns(3)
+
+            usage_col1.metric(
+                "Input Tokens",
+                st.session_state.ai_input_tokens,
+            )
+
+            usage_col2.metric(
+                "Output Tokens",
+                st.session_state.ai_output_tokens,
+            )
+
+            usage_col3.metric(
+                "Estimated Cost",
+                f"${st.session_state.ai_estimated_cost:.6f}",
+            )
+
+        if st.button(
+            "Clear AI Analysis",
+            type="secondary",
+        ):
+            keys_to_clear = [
+                "ai_advice",
+                "ai_input_tokens",
+                "ai_output_tokens",
+                "ai_estimated_cost",
+                "ai_analysis_month",
+                "ai_analysis_goal",
+                "ai_analysis_style",
+            ]
+
+            for key in keys_to_clear:
+                st.session_state.pop(key, None)
+
+            st.rerun()
+
+    st.divider()
+
+    st.caption(
+        "FinanceEasy AI provides educational budgeting guidance "
+        "and is not a substitute for professional financial advice."
+    )
 
 def show_settings() -> None:
     st.title("Settings")
