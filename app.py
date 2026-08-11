@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import re
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -171,6 +172,138 @@ def save_transactions(df: pd.DataFrame) -> None:
 
     saved_df.to_csv(DATA_FILE, index=False)
 
+def validate_imported_csv(
+    imported_df: pd.DataFrame,
+) -> tuple[bool, str]:
+    """Check whether an imported CSV has the required columns."""
+
+    required_columns = {
+        "date",
+        "description",
+        "category",
+        "amount",
+        "type",
+    }
+
+    imported_columns = set(
+        imported_df.columns.str.strip().str.lower()
+    )
+
+    missing_columns = (
+        required_columns - imported_columns
+    )
+
+    if missing_columns:
+        missing_text = ", ".join(
+            sorted(missing_columns)
+        )
+
+        return (
+            False,
+            f"Missing required columns: {missing_text}",
+        )
+
+    return True, ""
+
+
+def clean_imported_transactions(
+    imported_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Clean and standardize imported transaction data."""
+
+    cleaned_df = imported_df.copy()
+
+    # Normalize column names
+    cleaned_df.columns = (
+        cleaned_df.columns
+        .str.strip()
+        .str.lower()
+    )
+
+    # Keep only FinanceEasy columns
+    cleaned_df = cleaned_df[
+        TRANSACTION_COLUMNS
+    ].copy()
+
+    # Clean dates
+    cleaned_df["date"] = pd.to_datetime(
+        cleaned_df["date"],
+        errors="coerce",
+    )
+
+    # Clean amounts
+    cleaned_df["amount"] = pd.to_numeric(
+        cleaned_df["amount"],
+        errors="coerce",
+    )
+
+    # Clean text
+    cleaned_df["description"] = (
+        cleaned_df["description"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    cleaned_df["category"] = (
+        cleaned_df["category"]
+        .fillna("Other")
+        .astype(str)
+        .str.strip()
+    )
+
+    cleaned_df["type"] = (
+        cleaned_df["type"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.title()
+    )
+
+    # Remove rows with invalid essential data
+    cleaned_df = cleaned_df.dropna(
+        subset=[
+            "date",
+            "amount",
+        ]
+    )
+
+    # Only accept positive amounts
+    cleaned_df = cleaned_df[
+        cleaned_df["amount"] > 0
+    ]
+
+    # Only accept supported transaction types
+    cleaned_df = cleaned_df[
+        cleaned_df["type"].isin(
+            ["Expense", "Income"]
+        )
+    ]
+
+    cleaned_df = cleaned_df.reset_index(
+        drop=True
+    )
+
+    return cleaned_df
+
+
+def import_transactions(
+    current_df: pd.DataFrame,
+    imported_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge imported transactions into saved FinanceEasy data."""
+
+    combined_df = pd.concat(
+        [
+            current_df,
+            imported_df,
+        ],
+        ignore_index=True,
+    )
+
+    save_transactions(combined_df)
+
+    return combined_df
 
 def add_transaction(
     df: pd.DataFrame,
@@ -482,6 +615,9 @@ def get_ai_spending_advice(
             "Do not shame the user or recommend eliminating all discretionary "
             "spending. Do not present the response as professional financial, "
             "tax, legal, or investment advice."
+            "Follow the requested output structure exactly. "
+            "Return plain text only and never use Markdown formatting, "
+            "backticks, bold, italics, or code formatting."
         ),
         messages=[
             {
@@ -494,26 +630,44 @@ Analyze the following monthly financial summary:
 Response style:
 {style_instructions}
 
-Use exactly these headings:
+Use exactly this output format:
 
-### Financial Snapshot
-Briefly explain the user's current position and savings-goal status.
+Financial Snapshot
+One short paragraph.
 
-### Areas to Optimize
-Identify up to three categories worth reviewing. Explain why using the
-provided dollar amounts.
+Areas to Optimize
+- First point
+- Second point
+- Third point if needed
 
-### Recommended Changes
-Give three specific, realistic actions. Include estimated dollar amounts
-where possible.
+Recommended Changes
+1. First recommendation
+2. Second recommendation
+3. Third recommendation
 
-### Estimated Monthly Impact
-Estimate a reasonable savings range. Do not promise guaranteed results.
+Estimated Monthly Impact
+One short paragraph.
 
-### Next Step
-Give one action the user can take during the next seven days.
+Next Step
+One short sentence.
 
-Keep the complete response concise and readable.
+Formatting rules:
+- Do not use Markdown heading symbols such as #, ##, or ###.
+- Do not use bold text.
+- Do not use italics.
+- Do not use block quotes.
+- Do not use tables.
+- Do not use backticks or inline code formatting.
+- Return ordinary plain text only.
+- Put a normal space between every word.
+- Put a space after every period and comma.
+- Do not use underscores or asterisks anywhere.
+- Do not concatenate numbers, currency values, and words.
+- Write dollar amounts like "$400.00", followed by a normal space before the next word.
+- Use plain text section titles exactly as written above.
+- Use hyphens only for Areas to Optimize.
+- Use numbered items only for Recommended Changes.
+- Keep spacing consistent with one blank line between sections.
 """,
             }
         ],
@@ -551,6 +705,122 @@ Keep the complete response concise and readable.
         estimated_cost,
     )
 
+def clean_ai_text(text: str) -> str:
+    """Clean Markdown and formatting artifacts from AI responses."""
+
+    # Remove Markdown emphasis / code formatting
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("*", "")
+    text = text.replace("_", "")
+    text = text.replace("`", "")
+
+    # Remove Markdown heading markers
+    text = re.sub(
+        r"^#{1,6}\s*",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # Add space when a dollar amount is accidentally joined to a word
+    text = re.sub(
+        r"(\$\d+(?:,\d{3})*(?:\.\d{1,2})?)([A-Za-z])",
+        r"\1 \2",
+        text,
+    )
+
+    # Add space after punctuation if words become joined
+    text = re.sub(
+        r"([.!?,;:])([A-Za-z])",
+        r"\1 \2",
+        text,
+    )
+
+    # Normalize spaces, but preserve line breaks
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text,
+    )
+
+    # Reduce excessive blank lines
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text,
+    )
+
+    return text.strip()
+
+def escape_currency_for_streamlit(text: str) -> str:
+    """Prevent dollar signs from being interpreted as LaTeX."""
+    return text.replace("$", r"\$")
+
+def display_ai_advice(advice: str) -> None:
+    """Display AI advice with consistent Streamlit formatting."""
+
+    advice = clean_ai_text(advice)
+
+    section_names = [
+        "Financial Snapshot",
+        "Areas to Optimize",
+        "Recommended Changes",
+        "Estimated Monthly Impact",
+        "Next Step",
+    ]
+
+    sections = {}
+    current_section = None
+
+    for line in advice.splitlines():
+        stripped_line = line.strip()
+
+        if stripped_line in section_names:
+            current_section = stripped_line
+            sections[current_section] = []
+
+        elif current_section and stripped_line:
+            sections[current_section].append(stripped_line)
+
+    for section_name in section_names:
+        if section_name not in sections:
+            continue
+
+        st.subheader(section_name)
+
+        section_lines = sections[section_name]
+
+        # Areas to Optimize
+        if section_name == "Areas to Optimize":
+            for line in section_lines:
+                cleaned_line = line.lstrip("- ").strip()
+
+                safe_line = escape_currency_for_streamlit(
+                    cleaned_line
+                )
+
+                st.write(f"• {safe_line}")
+
+        # Recommended Changes
+        elif section_name == "Recommended Changes":
+            for line in section_lines:
+                safe_line = escape_currency_for_streamlit(
+                    line
+                )
+
+                st.write(safe_line)
+
+        # Paragraph sections
+        else:
+            paragraph = " ".join(section_lines)
+
+            safe_paragraph = escape_currency_for_streamlit(
+                paragraph
+            )
+
+            st.write(safe_paragraph)
+
 # =========================================================
 # SESSION STATE
 # =========================================================
@@ -577,7 +847,6 @@ with st.sidebar:
             "Transactions",
             "Budget",
             "Income",
-            "CSV Import",
             "Projections",
             "Calculators",
             "AI Advice",
@@ -721,7 +990,8 @@ def show_dashboard() -> None:
     # -----------------------------------------------------
 
     with chart_left:
-        st.subheader("Income vs. Spending Over Time")
+        st.subheader("Monthly Cash Flow")
+        st.caption("Tracks the total money earned and spent throughout the selected month.")
 
         if monthly_df.empty:
             st.info(
@@ -802,7 +1072,7 @@ def show_dashboard() -> None:
                     x=daily_pivot["date"],
                     y=daily_pivot["cumulative_income"],
                     mode="lines+markers",
-                    name="Cumulative Income",
+                    name="Money Earned",
                     line=dict(
                         color="#78C850",
                         width=3,
@@ -812,7 +1082,7 @@ def show_dashboard() -> None:
                     ),
                     hovertemplate=(
                         "<b>%{x|%b %d, %Y}</b><br>"
-                        "Cumulative income: $%{y:,.2f}"
+                        "Money earned so far: $%{y:,.2f}"
                         "<extra></extra>"
                     ),
                 )
@@ -824,7 +1094,7 @@ def show_dashboard() -> None:
                     x=daily_pivot["date"],
                     y=daily_pivot["cumulative_spending"],
                     mode="lines+markers",
-                    name="Cumulative Spending",
+                    name="Money Spent",
                     line=dict(
                         color="#FF4B4B",
                         width=3,
@@ -836,7 +1106,7 @@ def show_dashboard() -> None:
                     fillcolor="rgba(120, 200, 80, 0.10)",
                     hovertemplate=(
                         "<b>%{x|%b %d, %Y}</b><br>"
-                        "Cumulative spending: $%{y:,.2f}"
+                        "Money spent so far: $%{y:,.2f}"
                         "<extra></extra>"
                     ),
                 )
@@ -1112,14 +1382,9 @@ def update_transaction(
 
     return updated_df
 
-def show_transactions() -> None:
-    st.title("Transactions")
-    st.caption("Add, review, filter, and delete transactions.")
+def show_manual_transaction_entry() -> None:
+    """Display the manual transaction-entry form."""
 
-    # -----------------------------------------------------
-    # ADD TRANSACTION
-    # -----------------------------------------------------
-    
     with st.expander(
         "➕ Add a Transaction",
         expanded=True,
@@ -1209,6 +1474,140 @@ def show_transactions() -> None:
                     )
 
                     st.rerun()
+def show_csv_transaction_import() -> None:
+    """Display CSV transaction import controls."""
+
+    st.subheader("Import Transactions from CSV")
+
+    st.write(
+        "Upload a CSV containing your transaction data. "
+        "FinanceEasy will preview and validate the file before importing it."
+    )
+
+    st.info(
+        "Required columns: date, description, category, amount, type"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload transaction CSV",
+        type=["csv"],
+        accept_multiple_files=False,
+        key="transaction_csv_upload",
+    )
+
+    if uploaded_file is None:
+        return
+
+    try:
+        imported_df = pd.read_csv(uploaded_file)
+
+    except Exception as error:
+        st.error(
+            f"FinanceEasy could not read this CSV: {error}"
+        )
+        return
+
+    st.write(f"File: **{uploaded_file.name}**")
+    st.write(f"Rows detected: **{len(imported_df)}**")
+
+    with st.expander(
+        "Preview uploaded CSV",
+        expanded=True,
+    ):
+        st.dataframe(
+            imported_df.head(20),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    is_valid, validation_message = validate_imported_csv(
+        imported_df
+    )
+
+    if not is_valid:
+        st.error(validation_message)
+        return
+
+    cleaned_df = clean_imported_transactions(
+        imported_df
+    )
+
+    if cleaned_df.empty:
+        st.error(
+            "No valid transactions remained after validation."
+        )
+        return
+
+    removed_rows = len(imported_df) - len(cleaned_df)
+
+    st.success(
+        f"{len(cleaned_df)} valid transactions are ready to import."
+    )
+
+    if removed_rows > 0:
+        st.warning(
+            f"{removed_rows} row(s) were removed because they "
+            f"contained invalid dates, amounts, or transaction types."
+        )
+
+    st.subheader("Import Preview")
+
+    preview_df = cleaned_df.copy()
+
+    preview_df["date"] = (
+        preview_df["date"]
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    st.dataframe(
+        preview_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if st.button(
+        f"Import {len(cleaned_df)} Transactions",
+        type="primary",
+        use_container_width=True,
+    ):
+        st.session_state.transactions_df = import_transactions(
+            st.session_state.transactions_df,
+            cleaned_df,
+        )
+
+        st.success(
+            f"Successfully imported {len(cleaned_df)} transactions."
+        )
+
+        st.rerun()
+
+def show_transactions() -> None:
+    st.title("Transactions")
+    st.caption("Add, import, review, filter, and delete transactions.")
+
+    # -----------------------------------------------------
+    # ADD TRANSACTION
+    # -----------------------------------------------------
+    
+    entry_method = st.radio(
+        "How would you like to add transactions?",
+        [
+            "Manual Entry",
+            "CSV Import",
+        ],
+        horizontal=True,
+        key="transaction_entry_method",
+    )
+
+    st.divider()
+
+    if entry_method == "Manual Entry":
+        show_manual_transaction_entry()
+
+    else:
+        show_csv_transaction_import()
+
+    st.divider()    
 
     # -----------------------------------------------------
     # LOAD CURRENT TRANSACTION DATA
@@ -1621,20 +2020,6 @@ def show_placeholder(
     for feature in planned_features:
         st.write(f"• {feature}")
 
-
-def show_csv_import() -> None:
-    show_placeholder(
-        "CSV Import",
-        "Import transactions from a spreadsheet.",
-        [
-            "Upload CSV file",
-            "Preview imported rows",
-            "Validate required columns",
-            "Merge transactions with saved data",
-        ],
-    )
-
-
 def show_projections() -> None:
     show_placeholder(
         "Projections",
@@ -1819,7 +2204,7 @@ def show_ai_advice() -> None:
             f"{format_currency(st.session_state.ai_analysis_goal)}"
         )
 
-        st.markdown(
+        display_ai_advice(
             st.session_state.ai_advice
         )
 
@@ -1900,9 +2285,6 @@ elif page == "Budget":
 
 elif page == "Income":
     show_income()
-
-elif page == "CSV Import":
-    show_csv_import()
 
 elif page == "Projections":
     show_projections()
