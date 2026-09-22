@@ -270,7 +270,7 @@ Add, categorize, filter, and manage financial transactions, including support fo
 
 ### Budget & Savings Tracking
 
-![Budget and Savings](screenshots/budget.png)
+![Budget and Savings](screenshots/savings.png)
 
 Monitor spending against monthly budgets and track progress toward financial goals.
 
