@@ -327,7 +327,7 @@ The following mockups illustrate potential designs for future versions of Financ
 
 ##### Account & Data Management
 
-![FinanceEasy Account Management Concept](screenshots/concepts/account-settings.png)
+![FinanceEasy Account Management Concept](screenshots/concepts/account-management.png)
 
 > **Note:** These interfaces are conceptual previews of planned functionality. Their design and features may change as FinanceEasy continues to be developed.
 
