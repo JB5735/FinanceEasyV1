@@ -304,6 +304,33 @@ FinanceEasy is currently under active development. The current version runs loca
 - Improved transaction importing
 - Expanded AI-powered financial insights
 - Improved mobile responsiveness
+
+### 🌐 Future Web Platform
+
+The long-term vision for FinanceEasy is to transition the project from a locally run application into a fully hosted financial management platform.
+
+Future versions are planned to allow users to create secure accounts and maintain their own independent financial workspace. Transaction history, budgets, savings goals, preferences, and other financial data would be stored persistently and associated with each authenticated user rather than relying primarily on local application data.
+
+This transition would involve developing a database-backed architecture, secure authentication and authorization, protected user data storage, and a deployment infrastructure capable of supporting multiple users.
+
+#### Proposed Interface
+
+The following mockups illustrate potential designs for future versions of FinanceEasy. These are **concept designs and do not represent functionality available in the current version.**
+
+##### User Authentication
+
+![FinanceEasy Login Concept](screenshots/concepts/login.png)
+
+##### Personalized Financial Dashboard
+
+![FinanceEasy Dashboard Concept](screenshots/concepts/dashboard.png)
+
+##### Account & Data Management
+
+![FinanceEasy Account Management Concept](screenshots/concepts/account-settings.png)
+
+> **Note:** These interfaces are conceptual previews of planned functionality. Their design and features may change as FinanceEasy continues to be developed.
+
 ---
 
 ## 🎓 Project Goals
@@ -314,13 +341,15 @@ FinanceEasy was built as a hands-on software and data science project to explore
 
 Development of the project has involved working with structured datasets, persistent data pipelines, API integration, validation, interactive visualization, debugging, and user-facing application design.
 
+As FinanceEasy continues to develop, the project also serves as an opportunity to explore software architecture, database systems, authentication, machine learning, web deployment, and secure multi-user application design.
+
 ---
 
 ## 👤 Author
 
 **Jayden Baharudin**
 
-Statistics / Data Science student at Texas A&M University
+Statistics / Data Science student at Texas A&M University  
 Minors in Computer Science and Mathematics
 
 GitHub: [JB5735](https://github.com/JB5735)
